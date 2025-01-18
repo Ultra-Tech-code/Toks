@@ -2,6 +2,7 @@ use starknet::ContractAddress;
 use toksproject::types::{UserDetails, ContractInfo};
 use core::starknet::storage;
 
+
 #[starknet::interface]
 pub trait IToks<TContractState> {
     //read functions
@@ -15,10 +16,9 @@ pub trait IToks<TContractState> {
     fn deploy_token(
         ref self: TContractState, 
         owner: ContractAddress, 
-        token_name: felt252, 
-        token_symbol: felt252, 
-        total_supply: u32,
-        decimals: u32,
+        token_name: ByteArray, 
+        token_symbol: ByteArray, 
+        total_supply: u256,
     );
 }
 
@@ -39,20 +39,24 @@ pub mod Toks {
         contract_address_const, 
         get_block_timestamp
     };
+    use starknet::storage::{Map, StoragePointerReadAccess, StoragePointerWriteAccess, StoragePathEntry, StorageMapReadAccess, StorageMapWriteAccess};  
     use core::starknet::storage;
-    
     use toksproject::types::{UserDetails, ContractInfo};
+    use toksproject::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
+    use openzeppelin::token::erc20::interface::{IERC20MetadataDispatcher, IERC20MetadataDispatcherTrait};
+
+    const ERC20_class_hash: felt252 = 0x039eb955e0d7e447cabaf5a49825620e6004bd16f08d6f8c94481698ca77ff6d;
 
     #[storage]
     struct Storage {
         owner: ContractAddress,
         total_deployed_contract: u64,
         total_users: u16,
-        all_deployed_address: LegacyMap<u64, ContractAddress>,
-        user_info: LegacyMap<ContractAddress, UserDetails>,
-        contract_info: LegacyMap<ContractAddress, ContractInfo>,
-        user_deployed_tokens: LegacyMap<(ContractAddress, u32), ContractAddress>, // Changed u64 to u32
-        user_token_count: LegacyMap<ContractAddress, u32>, // Changed u64 to u32
+        all_deployed_address: Map<u64, ContractAddress>,
+        user_info: Map<ContractAddress, UserDetails>,
+        contract_info: Map<ContractAddress, ContractInfo>,
+        user_deployed_tokens: Map<ContractAddress, Map<u32, ContractAddress>>, 
+        user_token_count: Map<ContractAddress, u32>, 
     }
 
     #[event]
@@ -68,9 +72,9 @@ pub mod Toks {
         #[key]
         token_address: ContractAddress,
         #[key]
-        token_name: felt252,
-        token_symbol: felt252,
-        total_supply: u32,
+        token_name: ByteArray,
+        token_symbol: ByteArray,
+        total_supply: u256,
     }   
 
     #[constructor]
@@ -85,35 +89,50 @@ pub mod Toks {
         fn _deploy_erc20(
             ref self: ContractState,
             owner: ContractAddress,
-            token_name: felt252,
-            token_symbol: felt252,
-            total_supply: u32,
-            decimals: u32,
+            token_name: ByteArray,
+            token_symbol: ByteArray,
+            total_supply: u256,
         ) -> ContractAddress {
-            let erc20_class_hash: ClassHash = 0x02c6bd298f6115dc4366cac75e26de68fd487c94bdfea523b7c9f296cf515a26.try_into().unwrap();
+            let erc20_class_hash: ClassHash = ERC20_class_hash.try_into().unwrap();
             
-            let mut constructor_calldata = ArrayTrait::new();
-            constructor_calldata.append(token_name);
-            constructor_calldata.append(token_symbol);
-            constructor_calldata.append(decimals.into());
-            constructor_calldata.append(total_supply.into());
-            constructor_calldata.append(owner.into());
+           // let mut constructor_calldata = ArrayTrait::new();
+
+            let call_data: Array<felt252> = array![owner.into()];
+
+
+
+            // constructor_calldata.append(token_name);
+            // constructor_calldata.append(token_symbol);
+            // constructor_calldata.append(decimals.into());
+            // constructor_calldata.append(total_supply.try_into().unwrap());
+            // constructor_calldata.append(owner.into());
             
             let (contract_address, _) = deploy_syscall(
                 erc20_class_hash.try_into().unwrap(),
-                0,
-                constructor_calldata.span(),
+                self.total_deployed_contract.read().into(),
+                call_data.span(),
                 false
             ).unwrap();
+
+            IERC20Dispatcher{contract_address: contract_address}.initialize(token_name, token_symbol,total_supply);
+            
+            let contract_metadata = IERC20MetadataDispatcher{contract_address: contract_address};
+
+            self.emit(TokenDeployed { 
+                owner: owner,
+                token_address: contract_address,
+                token_name: contract_metadata.name(),
+                token_symbol: contract_metadata.symbol(),
+                total_supply: total_supply
+            });
             
             contract_address
         }
 
         fn _add_user_if_not_exists(ref self: ContractState, user: ContractAddress) {
-            let existing_user = self.user_info.read(user);
+            let existing_user = self.user_info.entry(user).read();
             if existing_user.user_address.is_zero() {
-                self.user_info.write(
-                    user,
+                self.user_info.entry(user).write(
                     UserDetails { 
                         user_address: user,
                         addresses_len: 0,
@@ -135,7 +154,7 @@ pub mod Toks {
                 if i >= total {
                     break;
                 }
-                result.append(self.all_deployed_address.read(i));
+                result.append(self.all_deployed_address.entry(i).read());
                 i += 1;
             };
             
@@ -147,14 +166,14 @@ pub mod Toks {
             user_address: ContractAddress
         ) -> Array<ContractAddress> {
             let mut result: Array<ContractAddress> = ArrayTrait::new();
-            let user_details = self.user_info.read(user_address);
+            let user_details = self.user_info.entry(user_address).read();
             let mut i: u32 = 0;
             
             loop {
                 if i >= user_details.addresses_len {
                     break;
                 }
-                result.append(self.user_deployed_tokens.read((user_address, i)));
+                result.append(self.user_deployed_tokens.entry(user_address).entry(i).read());
                 i += 1;
             };
             
@@ -165,14 +184,14 @@ pub mod Toks {
             self: @ContractState, 
             deployed_address: ContractAddress
         ) -> ContractInfo {
-            self.contract_info.read(deployed_address)
+            self.contract_info.entry(deployed_address).read()
         }
 
         fn get_user_details(
             self: @ContractState, 
             user_address: ContractAddress
         ) -> UserDetails {
-            self.user_info.read(user_address)
+            self.user_info.entry(user_address).read()
         }
 
         fn get_owner(self: @ContractState) -> ContractAddress {
@@ -182,10 +201,9 @@ pub mod Toks {
         fn deploy_token(
             ref self: ContractState,
             owner: ContractAddress,
-            token_name: felt252,
-            token_symbol: felt252,
-            total_supply: u32,
-            decimals: u32,
+            token_name: ByteArray,
+            token_symbol: ByteArray,
+            total_supply: u256,
         ) {
             let caller = get_caller_address();
             assert(!caller.is_zero(), 'INVALID_CALLER');
@@ -197,7 +215,6 @@ pub mod Toks {
                 token_name,
                 token_symbol,
                 total_supply,
-                decimals
             );
             
             // Add user if not exists
@@ -205,12 +222,11 @@ pub mod Toks {
             
             // Update storage
             let current_count = self.total_deployed_contract.read();
-            self.all_deployed_address.write(current_count, token_address);
+            self.all_deployed_address.entry(current_count).write(token_address);
             self.total_deployed_contract.write(current_count + 1);
             
             // Store contract info
-            self.contract_info.write(
-                token_address,
+            self.contract_info.entry(token_address).write(
                 ContractInfo {
                     contract_address: token_address,
                     deployment_time: get_block_timestamp(),
@@ -219,20 +235,13 @@ pub mod Toks {
             );
 
             // Update user's deployed tokens count and mapping
-            let mut user_details = self.user_info.read(owner);
+            let mut user_details = self.user_info.entry(owner).read();
             let current_user_count = user_details.addresses_len;
             
-            self.user_deployed_tokens.write((owner, current_user_count), token_address);
+            self.user_deployed_tokens.entry(owner).entry(current_user_count).write(token_address);
             user_details.addresses_len += 1;
-            self.user_info.write(owner, user_details);
+            self.user_info.entry(owner).write(user_details);
             
-            self.emit(TokenDeployed { 
-                owner: owner,
-                token_address: token_address,
-                token_name: token_name,
-                token_symbol: token_symbol,
-                total_supply: total_supply
-            });
         }
     }
 }

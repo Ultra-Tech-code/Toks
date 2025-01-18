@@ -1,1 +1,1 @@
-tests::test_toks::test_deploy_token
+toksproject_integrationtest::test_toks::test_deploy_token

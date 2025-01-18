@@ -1,169 +1,123 @@
-use starknet::ContractAddress;
-
+// SPDX-License-Identifier: MIT
 #[starknet::interface]
-trait IERC20<TContractState> {
-    fn name(self: @TContractState) -> felt252;
-    fn symbol(self: @TContractState) -> felt252;
-    fn decimals(self: @TContractState) -> u8;
-    fn total_supply(self: @TContractState) -> u256;
-    fn balance_of(self: @TContractState, account: ContractAddress) -> u256;
-    fn allowance(self: @TContractState, owner: ContractAddress, spender: ContractAddress) -> u256;
-    fn transfer(ref self: TContractState, recipient: ContractAddress, amount: u256) -> bool;
-    fn transfer_from(
-        ref self: TContractState, sender: ContractAddress, recipient: ContractAddress, amount: u256
-    ) -> bool;
-    fn approve(ref self: TContractState, spender: ContractAddress, amount: u256) -> bool;
+pub trait IERC20<TContractState> {
+    fn initialize(ref self: TContractState,name: ByteArray, symbol: ByteArray, initial_supply: u256);
 }
 
 #[starknet::contract]
 pub mod ERC20 {
-    use super::ContractAddress;
-    use core::num::traits::Zero;
-    use starknet::get_caller_address;
-    use core::integer::BoundedInt;
+    use openzeppelin::access::ownable::OwnableComponent;
+    use openzeppelin::security::pausable::PausableComponent;
+    use openzeppelin::token::erc20::ERC20Component;
+    use openzeppelin::upgrades::interface::IUpgradeable;
+    use openzeppelin::upgrades::UpgradeableComponent;
+    use starknet::{ClassHash, ContractAddress, get_caller_address, get_contract_address};
+
+    component!(path: ERC20Component, storage: erc20, event: ERC20Event);
+    component!(path: PausableComponent, storage: pausable, event: PausableEvent);
+    component!(path: OwnableComponent, storage: ownable, event: OwnableEvent);
+    component!(path: UpgradeableComponent, storage: upgradeable, event: UpgradeableEvent);
+
+    // External
+    #[abi(embed_v0)]
+    impl ERC20MixinImpl = ERC20Component::ERC20MixinImpl<ContractState>;
+    #[abi(embed_v0)]
+    impl PausableImpl = PausableComponent::PausableImpl<ContractState>;
+    #[abi(embed_v0)]
+    impl OwnableMixinImpl = OwnableComponent::OwnableMixinImpl<ContractState>;
+
+    // Internal
+    impl ERC20InternalImpl = ERC20Component::InternalImpl<ContractState>;
+    impl PausableInternalImpl = PausableComponent::InternalImpl<ContractState>;
+    impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
+    impl UpgradeableInternalImpl = UpgradeableComponent::InternalImpl<ContractState>;
+
+    #[storage]
+    struct Storage {
+        #[substorage(v0)]
+        erc20: ERC20Component::Storage,
+        #[substorage(v0)]
+        pausable: PausableComponent::Storage,
+        #[substorage(v0)]
+        ownable: OwnableComponent::Storage,
+        #[substorage(v0)]
+        upgradeable: UpgradeableComponent::Storage,
+    }
 
     #[event]
     #[derive(Drop, starknet::Event)]
     enum Event {
-        Transfer: Transfer,
-        Approval: Approval,
-    }
-
-    #[derive(Drop, starknet::Event)]
-    struct Transfer {
-        from: ContractAddress,
-        to: ContractAddress,
-        value: u256
-    }
-
-    #[derive(Drop, starknet::Event)]
-    struct Approval {
-        owner: ContractAddress,
-        spender: ContractAddress,
-        value: u256
-    }
-
-    #[storage]
-    struct Storage {
-        _name: felt252,
-        _symbol: felt252,
-        _total_supply: u256,
-        _decimals: u8,
-        _balances: LegacyMap<ContractAddress, u256>,
-        _allowances: LegacyMap<(ContractAddress, ContractAddress), u256>,
+        #[flat]
+        ERC20Event: ERC20Component::Event,
+        #[flat]
+        PausableEvent: PausableComponent::Event,
+        #[flat]
+        OwnableEvent: OwnableComponent::Event,
+        #[flat]
+        UpgradeableEvent: UpgradeableComponent::Event,
     }
 
     #[constructor]
-    fn constructor(
-        ref self: ContractState,
-        name: felt252,
-        symbol: felt252,
-        decimals: u8,
-        initial_supply: u256,
-        recipient: ContractAddress
-    ) {
-        self._name.write(name);
-        self._symbol.write(symbol);
-        self._decimals.write(decimals);
-        self._mint(recipient, initial_supply);
+    fn constructor(ref self: ContractState, owner: ContractAddress) {
+        self.ownable.initializer(owner);
     }
 
-    #[abi(embed_v0)]
-    impl IERC20Impl of super::IERC20<ContractState> {
-        fn name(self: @ContractState) -> felt252 {
-            self._name.read()
-        }
-
-        fn symbol(self: @ContractState) -> felt252 {
-            self._symbol.read()
-        }
-
-        fn decimals(self: @ContractState) -> u8 {
-            self._decimals.read()
-        }
-
-        fn total_supply(self: @ContractState) -> u256 {
-            self._total_supply.read()
-        }
-
-        fn balance_of(self: @ContractState, account: ContractAddress) -> u256 {
-            self._balances.read(account)
-        }
-
-        fn allowance(
-            self: @ContractState, owner: ContractAddress, spender: ContractAddress
-        ) -> u256 {
-            self._allowances.read((owner, spender))
-        }
-
-        fn transfer(ref self: ContractState, recipient: ContractAddress, amount: u256) -> bool {
-            let sender = get_caller_address();
-            self._transfer(sender, recipient, amount);
-            true
-        }
-
-        fn transfer_from(
-            ref self: ContractState,
-            sender: ContractAddress,
+    impl ERC20HooksImpl of ERC20Component::ERC20HooksTrait<ContractState> {
+        fn before_update(
+            ref self: ERC20Component::ComponentState<ContractState>,
+            from: ContractAddress,
             recipient: ContractAddress,
-            amount: u256
-        ) -> bool {
-            let caller = get_caller_address();
-            self._spend_allowance(sender, caller, amount);
-            self._transfer(sender, recipient, amount);
-            true
-        }
-
-        fn approve(ref self: ContractState, spender: ContractAddress, amount: u256) -> bool {
-            let caller = get_caller_address();
-            self._approve(caller, spender, amount);
-            true
+            amount: u256,
+        ) {
+            let contract_state = self.get_contract();
+            contract_state.pausable.assert_not_paused();
         }
     }
-
+    
     #[generate_trait]
-    impl InternalFunctions of InternalFunctionsTrait {
-        fn _mint(ref self: ContractState, recipient: ContractAddress, amount: u256) {
-            assert(!recipient.is_zero(), 'ERC20: mint to 0');
-            self._total_supply.write(self._total_supply.read() + amount);
-            self._balances.write(recipient, self._balances.read(recipient) + amount);
-            self.emit(Transfer { from: Zero::zero(), to: recipient, value: amount });
+    #[abi(per_item)]
+    impl ExternalImpl of ExternalTrait {
+        #[external(v0)]
+        fn pause(ref self: ContractState) {
+            self.ownable.assert_only_owner();
+            self.pausable.pause();
         }
 
-        fn _transfer(
-            ref self: ContractState,
-            sender: ContractAddress,
-            recipient: ContractAddress,
-            amount: u256
-        ) {
-            assert(!sender.is_zero(), 'ERC20: transfer from 0');
-            assert(!recipient.is_zero(), 'ERC20: transfer to 0');
-            self._balances.write(sender, self._balances.read(sender) - amount);
-            self._balances.write(recipient, self._balances.read(recipient) + amount);
-            self.emit(Transfer { from: sender, to: recipient, value: amount });
+        #[external(v0)]
+        fn unpause(ref self: ContractState) {
+            self.ownable.assert_only_owner();
+            self.pausable.unpause();
         }
 
-        fn _approve(
-            ref self: ContractState,
-            owner: ContractAddress,
-            spender: ContractAddress,
-            amount: u256
-        ) {
-            assert(!owner.is_zero(), 'ERC20: approve from 0');
-            assert(!spender.is_zero(), 'ERC20: approve to 0');
-            self._allowances.write((owner, spender), amount);
-            self.emit(Approval { owner, spender, value: amount });
+        #[external(v0)]
+        fn burn(ref self: ContractState, value: u256) {
+            self.erc20.burn(get_caller_address(), value);
         }
 
-        fn _spend_allowance(
-            ref self: ContractState, owner: ContractAddress, spender: ContractAddress, amount: u256
-        ) {
-            let current_allowance = self._allowances.read((owner, spender));
-            if current_allowance != BoundedInt::max() {
-                self._approve(owner, spender, current_allowance - amount);
-            }
+        #[external(v0)]
+        fn mint(ref self: ContractState, recipient: ContractAddress, amount: u256) {
+            self.ownable.assert_only_owner();
+            assert!(amount <= self.erc20.balanceOf(get_contract_address()), "ERC20: amount exceeds balance");
+            self.erc20.transfer_from(get_contract_address(), recipient, amount);
+        }
+
+        #[external(v0)]
+        fn initialize(ref self: ContractState,name: ByteArray, symbol: ByteArray, initial_supply: u256) {
+            // self.ownable.assert_only_owner();
+            self.erc20.initializer(name, symbol);
+            self.erc20.mint(get_contract_address(), initial_supply);
+        }
+    }
+
+    //
+    // Upgradeable
+    //
+    
+    #[abi(embed_v0)]
+    impl UpgradeableImpl of IUpgradeable<ContractState> {
+        fn upgrade(ref self: ContractState, new_class_hash: ClassHash) {
+            self.ownable.assert_only_owner();
+            self.upgradeable.upgrade(new_class_hash);
         }
     }
 }
-
-
